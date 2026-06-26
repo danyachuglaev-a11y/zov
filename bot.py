@@ -1,331 +1,484 @@
-import sqlite3
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+БОТ ДЛЯ ПЛАНЕТЫ ZOV 🇷🇺
+Реферальная система с анимацией сердечек.
+- Только админ создаёт ссылки (/createref)
+- При переходе по ссылке и отправке /start:
+  1. Пользователь получает текст извинений перед Катей
+  2. Запускается анимация: ❤️ → большое сердце → "I LOVE YOU" из сердечек
+- Админу приходит уведомление о переходе
+- Обычный /start без реф-метки — игнорируется
+"""
+
 import asyncio
-import aiohttp
-from datetime import datetime, time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import logging
+import sqlite3
+import random
+import string
+from datetime import datetime
+from typing import Optional
 
-# ========== КОНФИГУРАЦИЯ (ЗАПОЛНИ) ==========
-BOT_TOKEN = "7983079912:AAHCefiaT0VKoxZWF_x-QyBSnR9foinaG1U"  # Например: "789123456:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
-TON_WALLET_ADDRESS = "UQDfFJfq4mdt51_MD7PZ7MXnnOfXdw3nh18l9x4u8cNCqIh9"  # Например: "EQAVKMzqtrvNB2SkcBONOijadqFZ1gMdjmzh1Y3HB1p_zai5"
-TONAPI_KEY = "148e5d93fcc4001bdebbcd308221432d26e8a39719224a5d5769fd49274e14e3"
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
+# ==================== КОНФИГУРАЦИЯ ====================
+BOT_TOKEN = "8439349587:AAFTbZSNSnbUvW5U-z_FcwYOEcHY8URPBGI"
+ADMIN_ID = 1995696389  # ЗАМЕНИ НА СВОЙ ID
 
-# =============================================
+# Текст извинений перед Катей (отправляется перед анимацией)
+APOLOGY_TEXT = (
+    "Дорогая Катя! 🙏\n\n"
+    "Я приношу тебе свои глубочайшие извинения за всё, что произошло.\n"
+    "Ты — важный человек для меня за эти почти 9 месяцев я понял что я очень тебя люблю .\n"
+    "Прости меня, пожалуйста. ❤️\n\n"
+    "➡️ Смотри, что я для тебя приготовил..."
+)
 
-# ========== БАЗА ДАННЫХ ==========
+# Формат уведомления для админа
+NOTIFICATION_TEMPLATE = (
+    "🔔 <b>НОВЫЙ ПЕРЕХОД ПО РЕФЕРАЛЬНОЙ ССЫЛКЕ</b>\n\n"
+    "👤 <b>Пользователь:</b> {user_info}\n"
+    "🆔 <b>ID:</b> <code>{user_id}</code>\n"
+    "🔗 <b>Код ссылки:</b> <code>{code}</code>\n"
+    "🕐 <b>Время:</b> {time}\n"
+    "📊 <b>Статус:</b> Извинения + анимация отправлены ✅"
+)
+
+# ==================== БАЗА ДАННЫХ ====================
+DB_PATH = "referrals.db"
+
 def init_db():
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS operations (
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ref_links (
+            code TEXT PRIMARY KEY,
+            created_by INTEGER,
+            created_at TEXT,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ref_clicks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            type TEXT NOT NULL,
-            amount_ton REAL,
-            comment TEXT,
-            tx_hash TEXT UNIQUE
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS bot_state (
-            key TEXT PRIMARY KEY,
-            value TEXT
+            user_id INTEGER,
+            code TEXT,
+            clicked_at TEXT,
+            received_apology INTEGER DEFAULT 0,
+            admin_notified INTEGER DEFAULT 0
         )
     """)
     conn.commit()
     conn.close()
 
-def clear_old_data():
-    """Удаляет ВСЕ записи НЕ за сегодня"""
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM operations WHERE date != ?", (today_str,))
-    deleted = c.rowcount
+init_db()
+
+# ==================== БОТ ====================
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+def generate_ref_code() -> str:
+    chars = string.ascii_letters + string.digits
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    while True:
+        code = ''.join(random.choices(chars, k=8))
+        cur.execute("SELECT code FROM ref_links WHERE code = ?", (code,))
+        if not cur.fetchone():
+            conn.close()
+            return code
+        conn.close()
+
+def create_ref_link(code: str, admin_id: int) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ref_links (code, created_by, created_at) VALUES (?, ?, ?)",
+        (code, admin_id, datetime.now().isoformat())
+    )
     conn.commit()
     conn.close()
-    return deleted
+    return f"https://t.me/ВАШ_ЮЗЕРНЕЙМ_БОТА?start={code}"
 
-def add_auto_transaction(date, tx_hash, amount_ton, op_type, comment=""):
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    try:
-        c.execute("""
-            INSERT INTO operations (date, type, amount_ton, comment, tx_hash)
-            VALUES (?, ?, ?, ?, ?)
-        """, (date, op_type, amount_ton, comment, tx_hash))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
-
-def get_daily_summary(date):
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("SELECT SUM(amount_ton) FROM operations WHERE date=? AND type='expense_ton'", (date,))
-    expense_ton = c.fetchone()[0] or 0.0
-    c.execute("SELECT SUM(amount_ton) FROM operations WHERE date=? AND type='income_ton'", (date,))
-    income_ton = c.fetchone()[0] or 0.0
+def is_ref_code_valid(code: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT is_active FROM ref_links WHERE code = ? AND is_active = 1", (code,))
+    result = cur.fetchone()
     conn.close()
-    return expense_ton, income_ton
+    return result is not None
 
-def get_all_operations(date):
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("SELECT type, amount_ton, comment, tx_hash FROM operations WHERE date=? ORDER BY id DESC", (date,))
-    rows = c.fetchall()
+def mark_click(user_id: int, code: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ref_clicks (user_id, code, clicked_at) VALUES (?, ?, ?)",
+        (user_id, code, datetime.now().isoformat())
+    )
+    conn.commit()
     conn.close()
-    return rows
 
-def is_tx_already_recorded(tx_hash):
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("SELECT id FROM operations WHERE tx_hash = ?", (tx_hash,))
-    row = c.fetchone()
+def has_received_apology(user_id: int, code: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT received_apology FROM ref_clicks WHERE user_id = ? AND code = ? ORDER BY id DESC LIMIT 1",
+        (user_id, code)
+    )
+    result = cur.fetchone()
     conn.close()
-    return row is not None
+    return bool(result[0]) if result else False
 
-def get_all_tx_hashes():
-    """Возвращает множество всех хэшей в базе"""
-    conn = sqlite3.connect("zov_work.db")
-    c = conn.cursor()
-    c.execute("SELECT tx_hash FROM operations WHERE tx_hash IS NOT NULL")
-    rows = c.fetchall()
+def mark_apology_sent(user_id: int, code: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE ref_clicks SET received_apology = 1 WHERE user_id = ? AND code = ? AND received_apology = 0",
+        (user_id, code)
+    )
+    conn.commit()
     conn.close()
-    return {row[0] for row in rows}
 
-# ========== КУРСЫ КРИПТЫ ==========
-async def get_ton_price(vs_currency: str = "rub") -> float:
-    try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies={vs_currency}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                data = await resp.json()
-                return float(data["the-open-network"][vs_currency])
-    except:
-        return 85.0 if vs_currency == "rub" else 1.2
+def was_admin_notified(user_id: int, code: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT admin_notified FROM ref_clicks WHERE user_id = ? AND code = ? ORDER BY id DESC LIMIT 1",
+        (user_id, code)
+    )
+    result = cur.fetchone()
+    conn.close()
+    return bool(result[0]) if result else False
 
-# ========== TON API (СБОР ВСЕХ ТРАНЗАКЦИЙ ЗА СЕГОДНЯ) ==========
-async def fetch_and_update_today_transactions():
-    """
-    Загружает ВСЕ транзакции за сегодня и обновляет базу.
-    НЕ отправляет никаких сообщений в чат.
-    """
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    url = f"https://toncenter.com/api/v2/getTransactions?address={TON_WALLET_ADDRESS}&limit=100&archival=true&api_key={TONAPI_KEY}"
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                data = await resp.json()
-                if not data.get("ok"):
-                    return 0
-                
-                existing_hashes = get_all_tx_hashes()
-                new_count = 0
-                
-                for tx in data.get("result", []):
-                    tx_unixtime = tx.get("utime", 0)
-                    tx_date = datetime.fromtimestamp(tx_unixtime).strftime("%Y-%m-%d")
-                    
-                    # Только сегодняшние
-                    if tx_date != today_str:
-                        continue
-                    
-                    tx_hash = tx["transaction_id"]["hash"]
-                    
-                    # Пропускаем уже записанные
-                    if tx_hash in existing_hashes:
-                        continue
-                    
-                    comment = tx.get("in_msg", {}).get("message", "")
-                    
-                    # Входящая транзакция
-                    in_msg = tx.get("in_msg", {})
-                    if in_msg.get("source") and in_msg.get("source") != TON_WALLET_ADDRESS:
-                        value_nano = int(in_msg.get("value", 0))
-                        if value_nano > 0:
-                            value_ton = value_nano / 1e9
-                            add_auto_transaction(today_str, tx_hash, value_ton, "income_ton", comment or "входящий перевод")
-                            new_count += 1
-                            existing_hashes.add(tx_hash)
-                    
-                    # Исходящие транзакции
-                    out_msgs = tx.get("out_msgs", [])
-                    for out_msg in out_msgs:
-                        if out_msg.get("destination") and out_msg.get("destination") != TON_WALLET_ADDRESS:
-                            value_nano = int(out_msg.get("value", 0))
-                            if value_nano > 0:
-                                value_ton = value_nano / 1e9
-                                add_auto_transaction(today_str, tx_hash, value_ton, "expense_ton", comment or "исходящий перевод")
-                                new_count += 1
-                                existing_hashes.add(tx_hash)
-                
-                return new_count
-    except Exception as e:
-        print(f"Ошибка TON API: {e}")
-        return 0
+def mark_admin_notified(user_id: int, code: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE ref_clicks SET admin_notified = 1 WHERE user_id = ? AND code = ? AND admin_notified = 0",
+        (user_id, code)
+    )
+    conn.commit()
+    conn.close()
 
-# ========== АВТО-СБРОС В НОЧЬ (удаляем всё, кроме сегодня) ==========
-async def auto_reset_midnight(context: ContextTypes.DEFAULT_TYPE):
-    """В полночь удаляет все данные НЕ за сегодня"""
-    deleted = clear_old_data()
-    print(f"🌙 [СБРОС] Полночь. Удалено {deleted} записей. Оставлены только данные за сегодня.")
-
-# ========== АВТО-ФОНОВОЕ ОБНОВЛЕНИЕ (тихо) ==========
-async def auto_update_background(context: ContextTypes.DEFAULT_TYPE):
-    """Фоновое обновление данных кошелька — без отправки сообщений"""
-    new_count = await fetch_and_update_today_transactions()
-    if new_count > 0:
-        print(f"🔄 Фоновое обновление: добавлено {new_count} новых транзакций")
-
-# ========== ФОРМИРОВАНИЕ ОТЧЁТА ==========
-async def generate_report_text(date):
-    exp_ton, inc_ton = get_daily_summary(date)
-    net_ton = inc_ton - exp_ton
-    
-    ton_price_rub = await get_ton_price("rub")
-    ton_price_usd = await get_ton_price("usd")
-    
-    net_rub = net_ton * ton_price_rub
-    net_usd = net_ton * ton_price_usd
-    
-    operations = get_all_operations(date)
-    
-    report = f"═══════════════════════════════════\n"
-    report += f"📅 ОТЧЁТ ZOV ВОРКЕР за {date}\n"
-    report += f"═══════════════════════════════════\n\n"
-    
-    report += f"💎 TON (АВТО-УЧЁТ):\n"
-    report += f"   Потрачено:  {exp_ton:.4f} TON\n"
-    report += f"   Получено:   {inc_ton:.4f} TON\n"
-    report += f"   ▶ ЧИСТЫМИ:  {net_ton:.4f} TON\n\n"
-    
-    report += f"🔄 КОНВЕРТАЦИЯ:\n"
-    report += f"   Курс TON:   {ton_price_rub:.2f} ₽ / {ton_price_usd:.2f} $\n"
-    report += f"   ▶ В рублях:   {net_rub:.2f} ₽\n"
-    report += f"   ▶ В долларах: {net_usd:.2f} $\n\n"
-    
-    report += f"═══════════════════════════════════\n"
-    report += f"📋 ДЕТАЛЬНАЯ ВЫПИСКА:\n"
-    report += f"═══════════════════════════════════\n"
-    
-    if not operations:
-        report += "За сегодня пока нет операций.\n"
-    else:
-        for op in operations:
-            op_type, amount_ton, comment, tx_hash = op
-            arrow = "➕" if op_type == "income_ton" else "➖"
-            type_name = "Доход" if op_type == "income_ton" else "Расход"
-            report += f"{arrow} {type_name}: {amount_ton:.4f} TON"
-            if comment:
-                report += f" | {comment}"
-            if tx_hash:
-                report += f" | tx: {tx_hash[:12]}..."
-            report += "\n"
-    
-    report += f"═══════════════════════════════════\n"
-    report += f"🇷🇺 ZOV ВОРКЕР 🇷🇺"
-    
-    return report, net_ton, net_rub, net_usd
-
-# ========== КЛАВИАТУРА ==========
-def get_main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📊 Отчёт (текст)", callback_data="report_text"),
-         InlineKeyboardButton("📎 Отчёт (файл)", callback_data="report_file")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ========== ОБРАБОТЧИКИ ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🇷🇺 *ZOV Work Tracker (тихий режим)* 🇷🇺\n\n"
-        "⚡ РЕЖИМ РАБОТЫ:\n"
-        "• 💎 TON — АВТОМАТИЧЕСКОЕ ФОНОВОЕ ОБНОВЛЕНИЕ\n"
-        "• 🔄 Бот сам проверяет кошелёк и обновляет данные\n"
-        "• 📊 Ты нажимаешь «Отчёт» — получаешь актуальную выписку\n"
-        "• 🌙 В полночь — сброс данных за прошлый день\n\n"
-        "Нажми «Отчёт», чтобы увидеть все транзакции за сегодня:",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
+def format_notification(user_id: int, code: str, user_first_name: str, user_last_name: str = "", username: str = "") -> str:
+    name_parts = []
+    if user_first_name:
+        name_parts.append(user_first_name)
+    if user_last_name:
+        name_parts.append(user_last_name)
+    full_name = " ".join(name_parts) if name_parts else "Без имени"
+    user_info = f"{full_name}"
+    if username:
+        user_info += f" (@{username})"
+    current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    return NOTIFICATION_TEMPLATE.format(
+        user_info=user_info,
+        user_id=user_id,
+        code=code,
+        time=current_time
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    if data == "check_wallet":
-        # Ручная проверка (на всякий случай оставил)
-        await query.edit_message_text("🔍 Обновляю данные кошелька...")
-        new_count = await fetch_and_update_today_transactions()
-        await query.edit_message_text(f"✅ Обновлено. Добавлено {new_count} новых транзакций.")
-        await query.message.reply_text("Продолжаем?", reply_markup=get_main_keyboard())
-    
-    elif data in ["report_text", "report_file"]:
-        await query.edit_message_text("📊 Формирую отчёт...")
-        
-        # ПЕРЕД ОТЧЁТОМ — ПРИНУДИТЕЛЬНО ОБНОВЛЯЕМ ДАННЫЕ
-        new_count = await fetch_and_update_today_transactions()
-        
-        report_text, net_ton, net_rub, net_usd = await generate_report_text(today_str)
-        
-        # Добавляем информацию об обновлении
-        if new_count > 0:
-            report_text = f"🔄 Обновлено: +{new_count} новых транзакций\n\n{report_text}"
-        
-        if data == "report_text":
-            await query.edit_message_text(report_text)
-        else:
-            file_path = f"zov_report_{today_str}.txt"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(report_text)
-            with open(file_path, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"zov_report_{today_str}.txt",
-                    caption=f"📎 Выписка за {today_str}\nЧистый TON: {net_ton:.4f} | ₽: {net_rub:.2f} | $: {net_usd:.2f}"
-                )
-            os.remove(file_path)
-            await query.edit_message_text("✅ Отчёт отправлен файлом.")
-        await query.message.reply_text("Продолжаем?", reply_markup=get_main_keyboard())
+# ==================== [NEW] ФУНКЦИИ АНИМАЦИИ СЕРДЕЧЕК ====================
 
-# ========== ЗАПУСК ==========
-def main():
-    init_db()
+async def animate_hearts(message: Message, delay: float = 0.3):
+    """
+    Запускает анимацию сердечек с редактированием одного сообщения.
+    Этапы:
+    1. Одно сердечко ❤️
+    2. Маленькое сердце из 5 сердечек
+    3. Среднее сердце из 13 сердечек
+    4. Большое сердце из 25 сердечек
+    5. Огромное сердце из 41 сердечка
+    6. Слово "I" из сердечек
+    7. Слово "LOVE" из сердечек
+    8. Слово "YOU" из сердечек
+    9. Финальная фраза "I LOVE YOU ❤️" с мерцанием
+    """
     
-    # При старте — удаляем всё, что не сегодня
-    deleted = clear_old_data()
-    print(f"🔄 При запуске: удалено {deleted} старых записей")
+    # Этап 1: Одно сердечко
+    await message.edit_text("❤️")
+    await asyncio.sleep(delay)
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Этап 2: Маленькое сердце (5 сердец)
+    small_heart = [
+        "  ❤️  ",
+        "❤️❤️❤️",
+        "  ❤️  "
+    ]
+    await message.edit_text("\n".join(small_heart))
+    await asyncio.sleep(delay)
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    # Этап 3: Среднее сердце (13 сердец)
+    medium_heart = [
+        "  ❤️❤️  ",
+        "❤️❤️❤️❤️",
+        "❤️❤️❤️❤️",
+        "  ❤️❤️  "
+    ]
+    await message.edit_text("\n".join(medium_heart))
+    await asyncio.sleep(delay)
     
-    # ФОНОВЫЕ ЗАДАЧИ (без отправки сообщений в чат)
-    job_queue = app.job_queue
+    # Этап 4: Большое сердце (25 сердец)
+    big_heart = [
+        "  ❤️❤️❤️  ",
+        "❤️❤️❤️❤️❤️",
+        "❤️❤️❤️❤️❤️",
+        "❤️❤️❤️❤️❤️",
+        "  ❤️❤️❤️  "
+    ]
+    await message.edit_text("\n".join(big_heart))
+    await asyncio.sleep(delay)
     
-    if job_queue:
-        # Авто-обновление кошелька каждые 30 секунд (тихо)
-        job_queue.run_repeating(auto_update_background, interval=30, first=10)
-        # Авто-сброс в полночь
-        job_queue.run_daily(auto_reset_midnight, time=time(0, 0, 0))
-        print("✅ Фоновые задачи запущены: обновление каждые 30 сек, сброс в полночь")
+    # Этап 5: Огромное сердце (41 сердце)
+    huge_heart = [
+        "    ❤️❤️❤️    ",
+        "  ❤️❤️❤️❤️❤️  ",
+        "❤️❤️❤️❤️❤️❤️❤️",
+        "❤️❤️❤️❤️❤️❤️❤️",
+        "❤️❤️❤️❤️❤️❤️❤️",
+        "  ❤️❤️❤️❤️❤️  ",
+        "    ❤️❤️❤️    "
+    ]
+    await message.edit_text("\n".join(huge_heart))
+    await asyncio.sleep(delay * 1.5)
     
-    print("🇷🇺 ZOV WORK BOT (тихий режим) запущен. Жду приказов, мой господин.")
-    print(f"📍 Кошелёк: {TON_WALLET_ADDRESS}")
-    print("📊 Бот молчит в фоне. Ты нажимаешь «Отчёт» — видишь актуальные данные.")
+    # Этап 6: Слово "I" из сердечек (с анимацией появления)
+    i_pattern = [
+        "❤️❤️❤️",
+        "  ❤️  ",
+        "  ❤️  ",
+        "  ❤️  ",
+        "❤️❤️❤️"
+    ]
+    await message.edit_text("\n".join(i_pattern))
+    await asyncio.sleep(delay)
     
-    app.run_polling()
+    # Добавляем мерцание для "I"
+    for _ in range(2):
+        await asyncio.sleep(0.15)
+        await message.edit_text("✨\n" + "\n".join(i_pattern) + "\n✨")
+        await asyncio.sleep(0.15)
+        await message.edit_text("\n".join(i_pattern))
+    
+    await asyncio.sleep(delay)
+    
+    # Этап 7: Слово "LOVE" из сердечек
+    love_pattern = [
+        "❤️     ❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️",
+        "❤️     ❤️   ❤️  ❤️   ❤️  ❤️   ❤️",
+        "❤️     ❤️   ❤️  ❤️   ❤️  ❤️   ❤️",
+        " ❤️❤️   ❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️",
+        "   ❤️   ❤️      ❤️   ❤️  ❤️   ❤️",
+        "   ❤️   ❤️      ❤️   ❤️  ❤️   ❤️",
+        "❤️❤️     ❤️      ❤️❤️❤️   ❤️❤️❤️"
+    ]
+    await message.edit_text("\n".join(love_pattern))
+    await asyncio.sleep(delay)
+    
+    # Мерцание для "LOVE"
+    for _ in range(2):
+        await asyncio.sleep(0.15)
+        await message.edit_text("✨✨\n" + "\n".join(love_pattern) + "\n✨✨")
+        await asyncio.sleep(0.15)
+        await message.edit_text("\n".join(love_pattern))
+    
+    await asyncio.sleep(delay)
+    
+    # Этап 8: Слово "YOU" из сердечек
+    you_pattern = [
+        "❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️❤️❤️",
+        "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
+        "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
+        "❤️❤️❤️   ❤️❤️❤️   ❤️     ❤️",
+        "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
+        "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
+        "❤️   ❤️  ❤️❤️❤️   ❤️❤️❤️❤️❤️"
+    ]
+    await message.edit_text("\n".join(you_pattern))
+    await asyncio.sleep(delay)
+    
+    # Мерцание для "YOU"
+    for _ in range(2):
+        await asyncio.sleep(0.15)
+        await message.edit_text("✨✨✨\n" + "\n".join(you_pattern) + "\n✨✨✨")
+        await asyncio.sleep(0.15)
+        await message.edit_text("\n".join(you_pattern))
+    
+    await asyncio.sleep(delay)
+    
+    # Этап 9: Финальная фраза "I LOVE YOU ❤️" с пульсацией
+    final_text = "❤️❤️❤️ I LOVE YOU ❤️❤️❤️"
+    for i in range(5):
+        if i % 2 == 0:
+            await message.edit_text(f"💖 {final_text} 💖")
+        else:
+            await message.edit_text(f"❤️ {final_text} ❤️")
+        await asyncio.sleep(0.3)
+    
+    # Финальный кадр с увеличенным текстом
+    await message.edit_text(
+        "💖💖💖\n\n"
+        "❤️ I LOVE YOU ❤️\n\n"
+        "💖💖💖"
+    )
+    await asyncio.sleep(0.5)
+    
+    # Добавляем дополнительный эффект — градиент сердец (разные цвета)
+    hearts_gradient = [
+        "❤️🧡💛💚💙💜❤️",
+        "🧡💛💚💙💜❤️🧡",
+        "💛💚💙💜❤️🧡💛",
+        "💚💙💜❤️🧡💛💚",
+        "💙💜❤️🧡💛💚💙",
+        "💜❤️🧡💛💚💙💜",
+        "❤️🧡💛💚💙💜❤️"
+    ]
+    for grad in hearts_gradient:
+        await message.edit_text(
+            f"{grad}\n\n"
+            "❤️ I LOVE YOU ❤️\n\n"
+            f"{grad[::-1]}"
+        )
+        await asyncio.sleep(0.2)
+    
+    # Финальное сообщение с текстом извинений и анимацией
+    await message.edit_text(
+        "💖💖💖💖💖💖💖💖💖\n\n"
+        "❤️  I LOVE YOU, KATYA!  ❤️\n\n"
+        "💖💖💖💖💖💖💖💖💖\n\n"
+        "Ты прощена ❤️"
+    )
+
+# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+
+@dp.message(Command("createref"))
+async def cmd_create_ref(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    code = generate_ref_code()
+    bot_username = (await bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={code}"
+    create_ref_link(code, user_id)
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
+            [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
+        ]
+    )
+    await message.answer(
+        f"✅ <b>Реферальная ссылка создана, мой господин!</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"Код: <b>{code}</b>\n"
+        f"При переходе пользователь увидит анимацию с сердечками и извинения.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(F.data == "create_ref_again")
+async def callback_create_ref_again(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Эта кнопка только для админа.", show_alert=False)
+        return
+    
+    code = generate_ref_code()
+    bot_username = (await bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={code}"
+    create_ref_link(code, ADMIN_ID)
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
+            [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
+        ]
+    )
+    await callback.message.edit_text(
+        f"✅ <b>Новая реферальная ссылка создана, мой господин!</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"Код: <b>{code}</b>\n"
+        f"При переходе пользователь увидит анимацию с сердечками и извинения.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer()
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message, command: CommandObject):
+    """
+    Обработка /start с анимацией сердечек.
+    """
+    user_id = message.from_user.id
+    args = command.args
+    
+    if not args:
+        return
+    
+    code = args.strip()
+    if not is_ref_code_valid(code):
+        return
+    
+    admin_notified_before = was_admin_notified(user_id, code)
+    
+    # Если пользователь уже получал извинения — отправляем повторно (с анимацией)
+    if has_received_apology(user_id, code):
+        # Отправляем текст извинений
+        apology_msg = await message.answer(APOLOGY_TEXT)
+        # Запускаем анимацию (редактируем сообщение с текстом извинений)
+        await animate_hearts(apology_msg)
+        
+        if not admin_notified_before:
+            user = message.from_user
+            notification_text = format_notification(
+                user_id=user_id,
+                code=code,
+                user_first_name=user.first_name or "",
+                user_last_name=user.last_name or "",
+                username=user.username or ""
+            )
+            await bot.send_message(ADMIN_ID, notification_text)
+            mark_admin_notified(user_id, code)
+        return
+    
+    # Первый переход
+    mark_click(user_id, code)
+    
+    # Отправляем текст извинений
+    apology_msg = await message.answer(APOLOGY_TEXT)
+    
+    # Запускаем анимацию (редактируем сообщение с текстом извинений)
+    await animate_hearts(apology_msg)
+    
+    mark_apology_sent(user_id, code)
+    
+    # Уведомление админа
+    user = message.from_user
+    notification_text = format_notification(
+        user_id=user_id,
+        code=code,
+        user_first_name=user.first_name or "",
+        user_last_name=user.last_name or "",
+        username=user.username or ""
+    )
+    await bot.send_message(ADMIN_ID, notification_text)
+    mark_admin_notified(user_id, code)
+
+# ==================== ЗАПУСК ====================
+async def main():
+    logging.info("🚀 Бот ZOV v3000 запущен. Админ ID: %s", ADMIN_ID)
+    logging.info("✅ Анимация сердечек активирована")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
