@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-БОТ ДЛЯ ПЛАНЕТЫ ZOV 🇷🇺 (версия для python-telegram-bot)
+БОТ ДЛЯ ПЛАНЕТЫ ZOV 🇷🇺
 Реферальная система с анимацией сердечек.
+ТЕКСТ ИЗВИНЕНИЙ НЕ ПРОПАДАЕТ!
 """
 
 import asyncio
@@ -11,23 +12,27 @@ import logging
 import sqlite3
 import random
 import string
+import os
 from datetime import datetime
-from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from telegram.constants import ParseMode
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "8439349587:AAFTbZSNSnbUvW5U-z_FcwYOEcHY8URPBGI"
-ADMIN_ID = 1995696389  # ЗАМЕНИТЕ НА СВОЙ ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8439349587:AAFTbZSNSnbUvW5U-z_FcwYOEcHY8URPBGI")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1995696389"))
+
+# ИМЯ БОТА (ВСТАВЬ СЮДА СВОЙ ЮЗЕРНЕЙМ БЕЗ @)
+BOT_USERNAME = "gifpleasemebot"
 
 APOLOGY_TEXT = (
     "Дорогая Катя! 🙏\n\n"
-    "Я приношу тебе свои глубочайшие извинения за всё, что произошло.\n"
-    "Ты — важный человек в моей жизни и я очень люблю тебя .\n"
-    "Прости меня, пожалуйста. ❤️\n\n"
-    "➡️ Смотри, что я для тебя приготовил..."
+    "Я приношу тебе свои глубочайшие извинения за всё, что я тебе наговорил и как относился .\n"
+    "Ты — важный человек, и я осознал это для себя и не хочу тебя терять .\n"
+    "Прости меня, пожалуйста я очень сильно тебя люблю . ❤️"
 )
 
 NOTIFICATION_TEMPLATE = (
@@ -36,11 +41,11 @@ NOTIFICATION_TEMPLATE = (
     "🆔 <b>ID:</b> <code>{user_id}</code>\n"
     "🔗 <b>Код ссылки:</b> <code>{code}</code>\n"
     "🕐 <b>Время:</b> {time}\n"
-    "📊 <b>Статус:</b> Извинения + анимация отправлены ✅"
 )
 
 # ==================== БАЗА ДАННЫХ ====================
 DB_PATH = "referrals.db"
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -66,7 +71,16 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
+
+# ==================== БОТ ====================
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
+
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -82,6 +96,7 @@ def generate_ref_code() -> str:
             return code
         conn.close()
 
+
 def create_ref_link(code: str, admin_id: int) -> str:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -91,7 +106,8 @@ def create_ref_link(code: str, admin_id: int) -> str:
     )
     conn.commit()
     conn.close()
-    return f"https://t.me/ВАШ_ЮЗЕРНЕЙМ_БОТА?start={code}"
+    return f"https://t.me/{BOT_USERNAME}?start={code}"
+
 
 def is_ref_code_valid(code: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -100,6 +116,7 @@ def is_ref_code_valid(code: str) -> bool:
     result = cur.fetchone()
     conn.close()
     return result is not None
+
 
 def mark_click(user_id: int, code: str):
     conn = sqlite3.connect(DB_PATH)
@@ -110,6 +127,7 @@ def mark_click(user_id: int, code: str):
     )
     conn.commit()
     conn.close()
+
 
 def has_received_apology(user_id: int, code: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -122,6 +140,7 @@ def has_received_apology(user_id: int, code: str) -> bool:
     conn.close()
     return bool(result[0]) if result else False
 
+
 def mark_apology_sent(user_id: int, code: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -131,6 +150,7 @@ def mark_apology_sent(user_id: int, code: str):
     )
     conn.commit()
     conn.close()
+
 
 def was_admin_notified(user_id: int, code: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -143,6 +163,7 @@ def was_admin_notified(user_id: int, code: str) -> bool:
     conn.close()
     return bool(result[0]) if result else False
 
+
 def mark_admin_notified(user_id: int, code: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -153,7 +174,9 @@ def mark_admin_notified(user_id: int, code: str):
     conn.commit()
     conn.close()
 
-def format_notification(user_id: int, code: str, user_first_name: str, user_last_name: str = "", username: str = "") -> str:
+
+def format_notification(user_id: int, code: str, user_first_name: str, user_last_name: str = "",
+                        username: str = "") -> str:
     name_parts = []
     if user_first_name:
         name_parts.append(user_first_name)
@@ -171,178 +194,195 @@ def format_notification(user_id: int, code: str, user_first_name: str, user_last
         time=current_time
     )
 
-# ==================== АНИМАЦИЯ СЕРДЕЧЕК ====================
 
-async def animate_hearts(update: Update, context: ContextTypes.DEFAULT_TYPE, message_id: int):
-    """
-    Анимирует сообщение с сердечками через редактирование.
-    """
-    chat_id = update.effective_chat.id
-    delay = 0.3
-    
+# ==================== АНИМАЦИЯ СЕРДЦА ====================
+
+async def animate_heart(message: Message):
+    """Анимация сердца — ОТДЕЛЬНЫМ СООБЩЕНИЕМ, не редактирует текст извинений"""
     try:
-        # Этап 1: Одно сердечко
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="❤️")
-        await asyncio.sleep(delay)
-        
-        # Этап 2: Маленькое сердце
-        small_heart = ["  ❤️  ", "❤️❤️❤️", "  ❤️  "]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(small_heart))
-        await asyncio.sleep(delay)
-        
-        # Этап 3: Среднее сердце
-        medium_heart = ["  ❤️❤️  ", "❤️❤️❤️❤️", "❤️❤️❤️❤️", "  ❤️❤️  "]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(medium_heart))
-        await asyncio.sleep(delay)
-        
-        # Этап 4: Большое сердце
-        big_heart = ["  ❤️❤️❤️  ", "❤️❤️❤️❤️❤️", "❤️❤️❤️❤️❤️", "❤️❤️❤️❤️❤️", "  ❤️❤️❤️  "]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(big_heart))
-        await asyncio.sleep(delay)
-        
-        # Этап 5: Огромное сердце
-        huge_heart = [
-            "    ❤️❤️❤️    ",
-            "  ❤️❤️❤️❤️❤️  ",
-            "❤️❤️❤️❤️❤️❤️❤️",
-            "❤️❤️❤️❤️❤️❤️❤️",
-            "❤️❤️❤️❤️❤️❤️❤️",
-            "  ❤️❤️❤️❤️❤️  ",
-            "    ❤️❤️❤️    "
-        ]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(huge_heart))
-        await asyncio.sleep(delay * 1.5)
-        
-        # Этап 6: Слово "I"
-        i_pattern = ["❤️❤️❤️", "  ❤️  ", "  ❤️  ", "  ❤️  ", "❤️❤️❤️"]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(i_pattern))
-        await asyncio.sleep(delay)
-        
-        # Мерцание для "I"
-        for _ in range(2):
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✨\n" + "\n".join(i_pattern) + "\n✨")
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(i_pattern))
-        
-        await asyncio.sleep(delay)
-        
-        # Этап 7: Слово "LOVE"
-        love_pattern = [
-            "❤️     ❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️",
-            "❤️     ❤️   ❤️  ❤️   ❤️  ❤️   ❤️",
-            "❤️     ❤️   ❤️  ❤️   ❤️  ❤️   ❤️",
-            " ❤️❤️   ❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️",
-            "   ❤️   ❤️      ❤️   ❤️  ❤️   ❤️",
-            "   ❤️   ❤️      ❤️   ❤️  ❤️   ❤️",
-            "❤️❤️     ❤️      ❤️❤️❤️   ❤️❤️❤️"
-        ]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(love_pattern))
-        await asyncio.sleep(delay)
-        
-        for _ in range(2):
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✨✨\n" + "\n".join(love_pattern) + "\n✨✨")
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(love_pattern))
-        
-        await asyncio.sleep(delay)
-        
-        # Этап 8: Слово "YOU"
-        you_pattern = [
-            "❤️❤️❤️   ❤️❤️❤️   ❤️❤️❤️❤️❤️",
-            "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
-            "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
-            "❤️❤️❤️   ❤️❤️❤️   ❤️     ❤️",
-            "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
-            "❤️   ❤️  ❤️   ❤️  ❤️     ❤️",
-            "❤️   ❤️  ❤️❤️❤️   ❤️❤️❤️❤️❤️"
-        ]
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(you_pattern))
-        await asyncio.sleep(delay)
-        
-        for _ in range(2):
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="✨✨✨\n" + "\n".join(you_pattern) + "\n✨✨✨")
-            await asyncio.sleep(0.15)
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(you_pattern))
-        
-        await asyncio.sleep(delay)
-        
-        # Этап 9: Финальная фраза
-        final_text = "❤️❤️❤️ I LOVE YOU ❤️❤️❤️"
-        for i in range(5):
-            if i % 2 == 0:
-                await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"💖 {final_text} 💖")
-            else:
-                await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❤️ {final_text} ❤️")
-            await asyncio.sleep(0.3)
-        
-        # Финальный кадр
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="💖💖💖\n\n❤️ I LOVE YOU ❤️\n\n💖💖💖"
-        )
+        # Пауза перед анимацией
         await asyncio.sleep(0.5)
-        
-        # Градиент сердец
-        hearts_gradient = [
-            "❤️🧡💛💚💙💜❤️",
-            "🧡💛💚💙💜❤️🧡",
-            "💛💚💙💜❤️🧡💛",
-            "💚💙💜❤️🧡💛💚",
-            "💙💜❤️🧡💛💚💙",
-            "💜❤️🧡💛💚💙💜",
-            "❤️🧡💛💚💙💜❤️"
+
+        # Отправляем первое сообщение с анимацией
+        anim_msg = await message.answer("⏳ Сердце собирается...")
+
+        heart_pattern = [
+            "❤❤❤❤❤❤❤❤❤❤❤❤❤❤❤",
+            "❤❤❤😘😘😘❤❤❤😘😘😘❤❤❤",
+            "❤❤😘😘😘😘😘❤😘😘😘😘😘❤❤",
+            "❤❤😘😘😘😘😘😘😘😘😘😘😘❤❤",
+            "❤❤😘😘😘😘😘😘😘😘😘😘😘❤❤",
+            "❤❤❤😘😘😘😘😘😘😘😘😘❤❤❤",
+            "❤❤❤❤😘😘😘😘😘😘😘❤❤❤❤",
+            "❤❤❤❤❤❤😘😘😘❤❤❤❤❤❤",
+            "❤❤❤❤❤❤❤😘❤❤❤❤❤❤❤",
+            "❤❤❤❤❤❤❤❤❤❤❤❤❤❤❤"
         ]
-        for grad in hearts_gradient:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"{grad}\n\n❤️ I LOVE YOU ❤️\n\n{grad[::-1]}"
+
+        # Строим строку за строкой
+        current_build = []
+        for i, line in enumerate(heart_pattern):
+            current_build.append(line)
+            progress = "▓" * (i + 1) + "░" * (len(heart_pattern) - i - 1)
+            display_text = f"⏳ Строим сердечко... {progress}\n\n"
+            display_text += "\n".join(current_build)
+            await anim_msg.edit_text(display_text)
+            await asyncio.sleep(0.4)
+
+        await asyncio.sleep(0.5)
+
+        # Показываем готовое сердце
+        heart_display = "\n".join(heart_pattern)
+        await anim_msg.edit_text(f"❤️ СЕРДЦЕ ГОТОВО! ❤️\n\n{heart_display}")
+        await asyncio.sleep(0.8)
+
+        # Пульсация
+        for pulse in range(3):
+            framed = []
+            border = "❤" * 19
+            framed.append(border)
+            for line in heart_pattern:
+                framed.append("❤" + line + "❤")
+            framed.append(border)
+            await anim_msg.edit_text("💓 ПУЛЬСАЦИЯ 💓\n\n" + "\n".join(framed))
+            await asyncio.sleep(0.4)
+            await anim_msg.edit_text("❤️ СЕРДЦЕ ❤️\n\n" + "\n".join(heart_pattern))
+            await asyncio.sleep(0.4)
+
+        await asyncio.sleep(0.5)
+
+        # Появление надписи "Я ЛЮБЛЮ КАТЮ"
+        text = "Я ЛЮБЛЮ ТЕБЯ!"
+        for i in range(1, len(text) + 1):
+            display_text = text[:i]
+            await anim_msg.edit_text(f"❤️ {display_text} ❤️\n\n{heart_display}")
+            await asyncio.sleep(0.25)
+
+        await asyncio.sleep(0.5)
+
+        # Финальная пульсация
+        for pulse in range(3):
+            framed_heart = []
+            border = "❤" * 19
+            framed_heart.append(border)
+            for line in heart_pattern:
+                framed_heart.append("❤" + line + "❤")
+            framed_heart.append(border)
+            await anim_msg.edit_text(
+                f"💖💖💖 {text} 💖💖💖\n\n"
+                + "\n".join(framed_heart)
             )
-            await asyncio.sleep(0.2)
-        
-        # Финальное сообщение
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="💖💖💖💖💖💖💖💖💖\n\n❤️  I LOVE YOU, KATYA!  ❤️\n\n💖💖💖💖💖💖💖💖💖\n\nТы прощена ❤️"
+            await asyncio.sleep(0.4)
+            await anim_msg.edit_text(
+                f"❤️❤️❤️ {text} ❤️❤️❤️\n\n"
+                + heart_display
+            )
+            await asyncio.sleep(0.4)
+
+        await asyncio.sleep(0.5)
+
+        # ФИНАЛ
+        final_text = (
+            "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖\n"
+            "💖                                              💖\n"
+            "💖     ❤️  Я ЛЮБЛЮ ТЕБЯ, КАТЯ!  ❤️     💖\n"
+            "💖                                              💖\n"
+            "💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖💖\n\n"
+            "✨ Надеюсь мы больше не будем друг друга оскарблять, а только любить ценить и доверять  ✨\n\n"
+            "😘❤️😘❤️😘❤️😘❤️😘❤️😘❤️😘❤️😘❤️😘❤️"
         )
-    
+        await anim_msg.edit_text(final_text)
+
+        # Мерцание финала
+        for _ in range(2):
+            await asyncio.sleep(0.4)
+            await anim_msg.edit_text(final_text.replace("💖", "❤️"))
+            await asyncio.sleep(0.4)
+            await anim_msg.edit_text(final_text)
+
     except Exception as e:
         logging.error(f"Ошибка анимации: {e}")
 
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка команды /start"""
-    user_id = update.effective_user.id
-    args = context.args
-    
+@dp.message(Command("createref"))
+async def cmd_create_ref(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    code = generate_ref_code()
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={code}"
+    create_ref_link(code, user_id)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
+            [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
+        ]
+    )
+    await message.answer(
+        f"✅ <b>Реферальная ссылка создана, мой господин!</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"Код: <b>{code}</b>",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+
+@dp.callback_query(F.data == "create_ref_again")
+async def callback_create_ref_again(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Эта кнопка только для админа.", show_alert=False)
+        return
+
+    code = generate_ref_code()
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={code}"
+    create_ref_link(code, ADMIN_ID)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
+            [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
+        ]
+    )
+    await callback.message.edit_text(
+        f"✅ <b>Новая реферальная ссылка создана, мой господин!</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"Код: <b>{code}</b>",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer()
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    args = command.args
+
     if not args:
         return
-    
-    code = args[0].strip()
+
+    code = args.strip()
     if not is_ref_code_valid(code):
         return
-    
+
     admin_notified_before = was_admin_notified(user_id, code)
-    
-    # Отправляем текст извинений
-    msg = await update.message.reply_text(APOLOGY_TEXT)
-    
-    # Запускаем анимацию
-    await animate_hearts(update, context, msg.message_id)
-    
+
+    # ====== ОТПРАВЛЯЕМ ТЕКСТ ИЗВИНЕНИЙ (НЕ РЕДАКТИРУЕТСЯ) ======
+    await message.answer(APOLOGY_TEXT)
+
+    # ====== ЗАПУСКАЕМ АНИМАЦИЮ ОТДЕЛЬНЫМ СООБЩЕНИЕМ ======
+    await animate_heart(message)
+
     if not has_received_apology(user_id, code):
         mark_click(user_id, code)
         mark_apology_sent(user_id, code)
-    
-    # Уведомление админа
+
     if not admin_notified_before:
-        user = update.effective_user
+        user = message.from_user
         notification_text = format_notification(
             user_id=user_id,
             code=code,
@@ -350,89 +390,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_last_name=user.last_name or "",
             username=user.username or ""
         )
-        await context.bot.send_message(ADMIN_ID, notification_text, parse_mode=ParseMode.HTML)
+        await bot.send_message(ADMIN_ID, notification_text)
         mark_admin_notified(user_id, code)
 
-async def create_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /createref — только для админа"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        return
-    
-    code = generate_ref_code()
-    bot_username = (await context.bot.get_me()).username
-    ref_link = f"https://t.me/{bot_username}?start={code}"
-    create_ref_link(code, user_id)
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
-        [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
-    ])
-    
-    await update.message.reply_text(
-        f"✅ <b>Реферальная ссылка создана, мой господин!</b>\n\n"
-        f"<code>{ref_link}</code>\n\n"
-        f"Код: <b>{code}</b>\n"
-        f"При переходе пользователь увидит анимацию с сердечками и извинения.",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
-
-async def create_ref_again(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопки 'Создать ещё'"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("Эта кнопка только для админа.", show_alert=False)
-        return
-    
-    code = generate_ref_code()
-    bot_username = (await context.bot.get_me()).username
-    ref_link = f"https://t.me/{bot_username}?start={code}"
-    create_ref_link(code, ADMIN_ID)
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", url=ref_link)],
-        [InlineKeyboardButton(text="🔁 Создать ещё", callback_data="create_ref_again")]
-    ])
-    
-    await query.edit_message_text(
-        f"✅ <b>Новая реферальная ссылка создана, мой господин!</b>\n\n"
-        f"<code>{ref_link}</code>\n\n"
-        f"Код: <b>{code}</b>\n"
-        f"При переходе пользователь увидит анимацию с сердечками и извинения.",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
-
-# ==================== ОБРАБОТКА ОШИБОК ====================
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Логирование ошибок"""
-    logging.error(f"Update {update} caused error {context.error}")
 
 # ==================== ЗАПУСК ====================
 
-def main():
+async def main():
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=logging.INFO
     )
-    
-    # Создаём приложение с увеличенным таймаутом (решение ошибки TimedOut)
-    application = Application.builder().token(BOT_TOKEN).connect_timeout(30.0).read_timeout(30.0).build()
-    
-    # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("createref", create_ref))
-    application.add_handler(CallbackQueryHandler(create_ref_again, pattern="create_ref_again"))
-    application.add_error_handler(error_handler)
-    
     logging.info("🚀 Бот ZOV v3000 запущен. Админ ID: %s", ADMIN_ID)
-    logging.info("✅ Анимация сердечек активирована")
-    
-    application.run_polling()
+    logging.info("✅ Анимация сердца активирована")
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
